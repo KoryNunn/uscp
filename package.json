@@ -1,7 +1,7 @@
 {
   "name": "uscp",
   "version": "1.0.0",
-  "description": "",
+  "description": "Ultra Sonic Communication Protocol",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -13,5 +13,17 @@
   "devDependencies": {
     "crel": "^2.1.8",
     "tape": "^4.2.0"
-  }
+  },
+  "directories": {
+    "example": "example",
+    "test": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KoryNunn/uscp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KoryNunn/uscp/issues"
+  },
+  "homepage": "https://github.com/KoryNunn/uscp"
 }
