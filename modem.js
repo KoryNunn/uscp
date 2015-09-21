@@ -1,21 +1,34 @@
 var encdec = require('./encdec'),
+    audioContext = new (AudioContext || webkitAudioContext)(),
     encode = encdec.encode,
     decode = encdec.decode,
-    minFrequency = 19000,
-    maxFrequency = 21000,
-    frameTime = 90;
+    sampleRate = audioContext.sampleRate,
+    intSize = 8,
+    nyqist = sampleRate / 2,
+    fftSize = 512,
+    freqencyBinStep = sampleRate / fftSize,
+    binsPerStep = fftSize / (intSize * 2),
+    frequenciesPerBin = fftSize / binsPerStep,
+    maxFrequency = Math.floor(sampleRate / 2 - (freqencyBinStep * 16)),
+    minFrequency = Math.floor(maxFrequency - (freqencyBinStep * binsPerStep)),
+    frequencyRange = maxFrequency - minFrequency,
+    frequencyStep = frequencyRange / intSize,
+    carrierFrequency = maxFrequency + frequencyStep,
+    frameTime = 150;
 
-var audioContext = new (AudioContext || webkitAudioContext)();
+console.log(minFrequency, maxFrequency);
 
 var channelCache = {};
 
-function getChannel(audioContext, frequency, frameTime){
+gainTable = [1/32, 1/20, 1/8, 1/4, 1/4, 1/8, 1/8, 1/4, 1/4];
+
+function getChannel(audioContext, frequency, frameTime, gainIndex){
     if(channelCache[frequency]){
         return channelCache[frequency];
     }
 
     var gainNode = audioContext.createGain(),
-        gainOn = 1/32;
+        gainOn = gainTable[gainIndex];
     // Gain => Merger
 
     gainNode.gain.value = 0;
@@ -28,20 +41,16 @@ function getChannel(audioContext, frequency, frameTime){
 
     osc.start(0 / 1000);
 
-
-
     channelCache[frequency] = function(on, startTime){
-        // gainNode.gain.setValueAtTime(on ? gainOn : 0, startTime / 1000);
-        // gainNode.gain.setValueAtTime(0, (startTime + frameTime / 2) / 1000);
-
 
         gainNode.gain.setValueAtTime(0, (startTime) / 1000);
 
-        var toneTime = frameTime;
+        var toneTime = frameTime,
+            rampTime = 20;
 
         if(on){
-            gainNode.gain.linearRampToValueAtTime(gainOn, (startTime + 2) / 1000);
-            gainNode.gain.setValueAtTime(gainOn, (startTime + toneTime - 2) / 1000);
+            gainNode.gain.linearRampToValueAtTime(gainOn, (startTime + rampTime) / 1000);
+            gainNode.gain.setValueAtTime(gainOn, (startTime + toneTime - rampTime) / 1000);
             gainNode.gain.linearRampToValueAtTime(0, (startTime + toneTime) / 1000);
         }
     };
@@ -49,38 +58,77 @@ function getChannel(audioContext, frequency, frameTime){
     return channelCache[frequency];
 }
 
-function sendPacket(audioContext, minFrequency, maxFrequency, packets){
-    var firstPacket = packets[0];
+function sendPacket(channels, packet, time){
+    packet.forEach(function(bit, bitIndex){
+        var value = parseInt(bit);
+
+        channels[bitIndex](value, time);
+    });
+}
+
+function sendPackets(channels, packets, startTime, frameTime){
+    packets.forEach(function(packet, packetIndex){
+        var time = startTime + (packetIndex * frameTime);
+
+        getChannel(audioContext, carrierFrequency, frameTime, channels.length)(1, time);
+
+        sendPacket(channels, packet, time);
+    });
+}
+
+function modulate(input, callback){
+    if(!callback){
+        callback = function(){};
+    }
+
+    var packets = encode(input),
+        header = encode(Math.ceil(packets.length / 8) + ':'),
+        firstPacket = packets[0];
 
     if(!firstPacket){
         return;
     }
 
-    var packetSize = firstPacket.length;
-        frequencyStep = (maxFrequency - minFrequency) / packetSize,
-        startTime = (audioContext.currentTime * 1000);
+    var startTime = (audioContext.currentTime * 1000);
 
     var channels = firstPacket.map(function(packet, index){
-        return getChannel(audioContext, minFrequency + frequencyStep * index, frameTime);
+        return getChannel(audioContext, Math.floor(minFrequency + frequencyStep * index), frameTime, index);
     });
 
-    packets.forEach(function(packet, packetIndex){
-        packet.forEach(function(bit, bitIndex){
-            var value = parseInt(bit),
-                time = startTime + (packetIndex * frameTime);
+    sendPackets(channels, header, startTime, frameTime);
 
-            channels[bitIndex](value, time);
-        });
-    });
-}
+    var frameIndex = 0,
+        headerTime = (header.length * frameTime);
 
-function modulate(input){
-    sendPacket(audioContext, minFrequency, maxFrequency, encode(input));
+    while(packets.length){
+
+        sendPackets(
+            channels,
+            packets.splice(0, 8),
+
+            startTime +
+            headerTime +
+            (frameIndex * 9 * frameTime) +
+            frameTime,
+
+            frameTime
+        );
+        frameIndex++;
+    }
+
+    setTimeout(callback,
+        (
+            headerTime +
+            (frameIndex * 9 * frameTime)
+        )
+    );
 }
 
 function connectInputStream(analyser){
     var constraints = {
-        audio: { optional: [{ echoCancellation: false }] }
+        audio: { optional: [{
+            echoCancellation: false
+        }] }
       };
 
     navigator.webkitGetUserMedia(
@@ -99,12 +147,11 @@ function connectInputStream(analyser){
 }
 
 function demodulate(callback){
-    var analyser = audioContext.createAnalyser(),
-        nyqist = audioContext.sampleRate / 2;
+    var analyser = audioContext.createAnalyser();
 
     connectInputStream(analyser);
 
-    analyser.fftSize = 2048;
+    analyser.fftSize = fftSize;
 
     var bufferLength = analyser.frequencyBinCount;
 
@@ -112,23 +159,35 @@ function demodulate(callback){
 
     var dataBuffer = [];
 
-    var frequencyRange = nyqist / bufferLength;
+    var binRange = nyqist / bufferLength;
 
     var currentBits,
-        frameStart = Date.now();
+        frameStart = Date.now(),
+        frameCount = null,
+        message = '';
 
     function listen(){
         analyser.getFloatFrequencyData(dataArray);
 
-        var freqBinRange = Array.prototype.slice.call(dataArray, minFrequency / frequencyRange, maxFrequency / frequencyRange);
+        var freqBinRange = Array.prototype.slice.call(dataArray, minFrequency / binRange, maxFrequency / binRange),
+            minValue = -100,
+            threshold = minValue * 0.4;
 
+        // console.log(freqBinRange.reduce(function(result, value){
+        //     return result + '' + (value > threshold ? 1 : 0) ;
+        // }, ''));
 
         var bits = [],
-            anyData;
+            carrierValue = dataArray[Math.floor(carrierFrequency / binRange)],
+            anyData = carrierValue > threshold;
 
-        while(bits.length < 8){
-            var bit = freqBinRange[Math.round(bits.length * (freqBinRange.length / 8))] > -55 ? 1 : 0;
+        for(var i = 0; i < intSize; i++){
+            var bitIndex = Math.floor(freqBinRange.length / 8 * i),
+                value = freqBinRange[bitIndex],
+                bit = value > threshold ? 1 : 0;
+
             bits.push(bit);
+
             if(bit){
                 anyData = true;
             }
@@ -146,14 +205,15 @@ function demodulate(callback){
         }else if(currentBits){
             var packetTime = now - frameStart,
                 packetLength = Math.floor(packetTime / frameTime),
-                frameBitLength = Math.floor(currentBits.length / packetLength);
+                frameBitLength = Math.floor(currentBits.length / packetLength),
+                leadTime = frameBitLength / 3; // Jump a quarter frame in.
 
             for(var i = 0; i < packetLength; i++){
                 dataBuffer.push(
                     currentBits
                     .slice(
-                        Math.floor(i * frameBitLength) + 1,
-                        Math.floor(i * frameBitLength + frameBitLength) - 1
+                        Math.floor(i * frameBitLength + leadTime),
+                        Math.floor(i * frameBitLength + frameBitLength - leadTime)
                     )
                     .reduce(function(result, bits){
                         bits.map(function(value, index){
@@ -162,7 +222,7 @@ function demodulate(callback){
                         return result;
                     }, [0,0,0,0,0,0,0,0])
                     .map(function(value){
-                        return Math.round(value / frameBitLength);
+                        return Math.round(value / (frameBitLength - leadTime * 2));
                     })
                 );
 
@@ -170,7 +230,24 @@ function demodulate(callback){
 
 
             if(dataBuffer.length){
-                callback(null, decode(dataBuffer));
+                var frameValue = decode(dataBuffer);
+
+                if(frameCount === null){
+                    var headerMatch = frameValue.match(/([0-9]+):/);
+                    if(headerMatch){
+                        frameCount = parseInt(headerMatch[1]);
+                    }
+                }else{
+                    frameCount--;
+                    message += frameValue;
+                }
+
+                if(frameCount === 0){
+                    callback(null, message);
+                    message = '';
+                    frameCount = null;
+                }
+
                 dataBuffer = [];
             }
             currentBits = null;
