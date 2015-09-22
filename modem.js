@@ -5,11 +5,11 @@ var encdec = require('./encdec'),
     sampleRate = audioContext.sampleRate,
     intSize = 8,
     nyqist = sampleRate / 2,
-    fftSize = 512,
+    fftSize = 1024,
     freqencyBinStep = sampleRate / fftSize,
     binsPerStep = fftSize / (intSize * 2),
     frequenciesPerBin = fftSize / binsPerStep,
-    maxFrequency = Math.floor(sampleRate / 2 - (freqencyBinStep * 16)),
+    maxFrequency = Math.floor(sampleRate / 2 - (freqencyBinStep * 64)),
     minFrequency = Math.floor(maxFrequency - (freqencyBinStep * binsPerStep)),
     frequencyRange = maxFrequency - minFrequency,
     frequencyStep = frequencyRange / intSize,
@@ -146,7 +146,7 @@ function connectInputStream(analyser){
     );
 }
 
-function demodulate(callback){
+function demodulate(callback, fftFrameCallback){
     var analyser = audioContext.createAnalyser();
 
     connectInputStream(analyser);
@@ -170,12 +170,29 @@ function demodulate(callback){
         analyser.getFloatFrequencyData(dataArray);
 
         var freqBinRange = Array.prototype.slice.call(dataArray, minFrequency / binRange, maxFrequency / binRange),
-            minValue = -100,
-            threshold = minValue * 0.4;
+            range = freqBinRange.reduce(function(result, value){
+                result[0] = Math.min(result[0], value);
+                result[1] = Math.max(result[1], value);
+                return result;
+            }, [Infinity, -Infinity]),
+            carrierValue = dataArray[Math.floor(carrierFrequency / binRange)],
+            emptyValue = dataArray[Math.floor(((carrierFrequency - maxFrequency) / 2 + maxFrequency) / binRange)]
+            minValue = range[0],
+            maxValue = range[1],
+            threshold = minValue + (maxValue - emptyValue);
 
-        // console.log(freqBinRange.reduce(function(result, value){
-        //     return result + '' + (value > threshold ? 1 : 0) ;
-        // }, ''));
+        console.log(threshold, emptyValue, minValue, maxValue);
+
+        // console.log(
+        //     freqBinRange.reduce(function(result, value){
+        //         return result + ' ' + Math.floor(-value / 12);
+        //     }, ''),
+        //     freqBinRange.reduce(function(result, value){
+        //         result[0] = Math.min(result[0], Math.floor(-value / 12));
+        //         result[1] = Math.max(result[1], Math.floor(-value / 12));
+        //         return result;
+        //     }, [Infinity, -Infinity])
+        // );
 
         var bits = [],
             carrierValue = dataArray[Math.floor(carrierFrequency / binRange)],
